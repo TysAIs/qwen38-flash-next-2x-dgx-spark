@@ -1,0 +1,89 @@
+# vLLM lane — the mature engine: use this for MANY simultaneous clients.
+#
+# Published alongside recipes/tensorfold.yaml. Select with ENGINE=vllm ./run.sh  (the default)
+# The checkpoint is NOT chosen here: lib-lanes.sh resolves CHECKPOINT (stock | uncensored) and
+# overrides `model` / `served-model-name`, so both lanes run either checkpoint.
+#
+# STATUS, measured 2026-09-29 on 2x DGX Spark (128 GB each), RDMA over the ConnectX link,
+# bench_concurrent, 256 tokens, 0 failed / 0 unmeasured across all 16 cells:
+#
+#   aggregate c=1                64.2 tok/s
+#   aggregate c=4               132.4 tok/s
+#   aggregate c=8               210.5 tok/s
+#   aggregate c=16              249.3 tok/s      <- 4.02x scaling from c=1
+#   per-stream c=16              29.5 tok/s
+#   draft acceptance            3.28 tok/round (single stream) / 3.47 (mixed concurrency)
+#
+# This is the lane that scales. Its single-stream numbers are LOWER than the TensorFold lane
+# (67.7 vs 71.0 tok/s on Method-D forced-512), which is the trade: vLLM gives up per-stream speed
+# to multiply aggregate throughput. See docs/ENGINES.md for the full comparison.
+
+server:
+  image: myllmbox/qwen38-flash-next-cluster-vllm:v6-spinfix   # pinned public tag (digest in README)
+                                                      # = vLLM 0.30.0 (vllm/vllm-openai) + patches:
+                                                      # the NVFP4 n-gram table on 0.30's embedding plugin;
+                                                      # the 4-bit output head (hibrid48) — stock 0.30 cannot
+                                                      # load either; the fused multi-step MTP draft
+                                                      # (= vllm-project/vllm#58449); QSA rope clamp;
+                                                      # loader page-cache drop.
+  cpuset: "5-9,15-19"                           # the GB10's 10 Cortex-X925 3.9GHz cores (0-4,10-14 are
+                                                # 2.8GHz A725) — measured +2-3% at every concurrency
+  model: myllmbox/Qwen3.8-Flash-Next-hibrid48    # overridden by lib-lanes.sh (CHECKPOINT)
+  port: 8888                                    # OpenAI API on the head box
+  host: 0.0.0.0                                 # the cluster runs on host networking — 127.0.0.1 keeps the API
+                                                # local; set to 0.0.0.0 to expose it on the LAN
+  master_port: 25000                            # torch.distributed rendezvous, on the interconnect
+  models_dir: ./models
+  cache_dir: ./cache                            # compile/autotune caches (per box); deletable, first boot rebuilds
+
+env:
+  # The n-gram (PLE) table is an ordinary GPU parameter in hibrid47/48 — no offload worker.
+  MBX_FUSED_DRAFT: "1"
+  MBX_PLE_REPLICATE: "0"                        # HALF the table per box (14.3G), exchanged per gather. On vLLM 0.30 this
+                                                # measured the SAME speed as the full table per box at 1/16/32 concurrent
+                                                # (it was slower on 0.29) and frees 13.4G per box → the 41G KV pin below.
+                                                # "1" = the full table on each box (then drop kv-cache-memory to 28G)
+  # No OMP_NUM_THREADS: vLLM sizes its threads itself (many for the load, one for serving); a fixed value hurts one phase.
+  PYTHONUNBUFFERED: "1"                         # rank-1 load progress actually shows in docker logs
+  TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "180"       # die in 3 min on a stuck collective instead of hanging 30
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"               # Marlin small-N fast path (self-gating)
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+  # RoCE v2 over the ConnectX link (NCCL_SOCKET_IFNAME / NCCL_IB_HCA / GLOO_SOCKET_IFNAME / VLLM_HOST_IP are
+  # per box and come from cluster.env). Validated set: RDMA port counters moving, TCP path flat.
+  NCCL_IB_GID_INDEX: "3"
+  NCCL_IB_ROCE_VERSION_NUM: "2"
+  NCCL_IB_ADDR_FAMILY: "AF_INET"
+  NCCL_CROSS_NIC: "1"
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_NVLS_ENABLE: "0"
+  NCCL_MAX_NCHANNELS: "4"                       # NCCL builds 64 channels here and splits every large message across all of
+                                                # them; with no GPUDirect RDMA on the GB10 each piece is copied through host
+                                                # memory, so 4 is faster: +10 % tok/s at 32 concurrent, +7 % at 64, same at 1
+
+vllm:
+  served-model-name: qwen3.8-flash-next          # overridden by lib-lanes.sh (CHECKPOINT)
+  engram-config: '{"cpu_offload": false}'      # vLLM 0.30 defaults to keeping the n-gram table in pinned host memory; this
+                                                # image serves it from the GPU (the layout every number was measured on)
+  gdn-prefill-backend: flashinfer               # +5 % prefill over triton from 8k to 256k tokens, same decode speed
+  speculative-config: '{"method": "qwen3_exp_mtp", "num_speculative_tokens": 5}'
+                                                # K=5 fused multi-step MTP draft. Acceptance ~3.3-3.5 tok/round here vs
+                                                # the TensorFold lane's 4.6 — the drafter is this engine's weak spot.
+  load-format: fastsafetensors                  # the loader every boot figure below was measured with (weights in ~97 s,
+                                                # the whole boot ~4 min); remove for vLLM's default safetensors loader
+  max-model-len: 262144                         # the model's native max
+  max-num-seqs: 64                              # 64 seats × ~38k tokens of pool each. With K=5 each running request
+                                                # pins more pool at admission (the model's GDN recurrent state + the longer draft
+                                                # ring): 64 long answers fill the pool after ~3 min and requests start to queue.
+                                                # 48 keeps headroom (~75 % at 48 pasture-length streams)
+  kv-cache-memory: "41000000000"                # 41G per box = 2,500,128 pooled KV tokens in bf16 (9.5× the 262K window; KV
+                                                # is 9.4 MB per 1k tokens in bf16, so the pool is what lets 64 streams
+                                                # each hold a long answer). Do not raise on a 128G box — unified memory
+                                                # is shared with the weights and the compile cache.
+  dtype: bfloat16
+  trust-remote-code: "true"                     # the hibrid48 architecture is not in stock transformers
+  enable-auto-tool-choice: "true"
+  tool-call-parser: qwen3_xml
+  reasoning-parser: qwen3
