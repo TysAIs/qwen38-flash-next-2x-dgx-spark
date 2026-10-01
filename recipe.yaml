@@ -78,7 +78,7 @@ vllm:
   load-format: fastsafetensors                  # the loader every boot figure below was measured with (weights in ~97 s,
                                                 # the whole boot ~4 min); remove for vLLM's default safetensors loader
   max-model-len: 262144                         # the model's native max
-  max-num-seqs: 12                              # 64 seats × ~38k tokens of pool each (2.45M / 64). With K=5 each running request
+  max-num-seqs: 64                              # 64 seats × ~38k tokens of pool each (2.45M / 64). With K=5 each running request
                                                 # pins more pool at admission (the model's GDN recurrent state + the longer draft
                                                 # ring): 64 long answers fill the pool after ~3 min and requests start to queue.
                                                 # 48 keeps headroom (~75 % at 48 pasture-length streams)

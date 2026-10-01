@@ -1,23 +1,8 @@
-# vLLM lane — the mature engine: use this for MANY simultaneous clients.
+# The model-side configuration for this kit. This file and recipe.yaml hold the same
+# settings; recipe.yaml is the one run.sh reads. Keep them in sync.
 #
-# Published alongside recipes/tensorfold.yaml. Select with ENGINE=vllm ./run.sh  (the default)
-# The checkpoint is NOT chosen here: lib-lanes.sh resolves CHECKPOINT (stock | uncensored) and
-# overrides `model` / `served-model-name`, so both lanes run either checkpoint.
+# To switch checkpoints, edit the `model:` line below (comment one, uncomment the other).
 #
-# STATUS, measured 2026-09-29 on 2x DGX Spark (128 GB each), RDMA over the ConnectX link,
-# bench_concurrent, 256 tokens, 0 failed / 0 unmeasured across all 16 cells:
-#
-#   aggregate c=1                64.2 tok/s
-#   aggregate c=4               132.4 tok/s
-#   aggregate c=8               210.5 tok/s
-#   aggregate c=16              249.3 tok/s      <- 4.02x scaling from c=1
-#   per-stream c=16              29.5 tok/s
-#   draft acceptance            3.28 tok/round (single stream) / 3.47 (mixed concurrency)
-#
-# This is the lane that scales. Its single-stream numbers are LOWER than the TensorFold lane
-# (67.7 vs 71.0 tok/s on Method-D forced-512), which is the trade: vLLM gives up per-stream speed
-# to multiply aggregate throughput. See docs/ENGINES.md for the full comparison.
-
 server:
   image: myllmbox/qwen38-flash-next-cluster-vllm:v6-spinfix-hermes   # pinned public tag (digest in README)
                                                       # = vLLM 0.30.0 (vllm/vllm-openai) + patches:
@@ -28,7 +13,7 @@ server:
                                                       # loader page-cache drop.
   cpuset: "5-9,15-19"                           # the GB10's 10 Cortex-X925 3.9GHz cores (0-4,10-14 are
                                                 # 2.8GHz A725) — measured +2-3% at every concurrency
-  model: myllmbox/Qwen3.8-Flash-Next-hibrid48    # overridden by lib-lanes.sh (CHECKPOINT)
+  model: myllmbox/Qwen3.8-Flash-Next-hibrid48    # or ...-uncensored (gated; accept the HF agreement first)
   port: 8888                                    # OpenAI API on the head box
   host: 0.0.0.0                                 # the cluster runs on host networking — 127.0.0.1 keeps the API
                                                 # local; set to 0.0.0.0 to expose it on the LAN
@@ -64,13 +49,13 @@ env:
                                                 # memory, so 4 is faster: +10 % tok/s at 32 concurrent, +7 % at 64, same at 1
 
 vllm:
-  served-model-name: qwen3.8-flash-next          # overridden by lib-lanes.sh (CHECKPOINT)
+  served-model-name: qwen3.8-flash-next          # the id clients pass; set it to match `model` if you switch
   engram-config: '{"cpu_offload": false}'      # vLLM 0.30 defaults to keeping the n-gram table in pinned host memory; this
                                                 # image serves it from the GPU (the layout every number was measured on)
   gdn-prefill-backend: flashinfer               # +5 % prefill over triton from 8k to 256k tokens, same decode speed
   speculative-config: '{"method": "qwen3_exp_mtp", "num_speculative_tokens": 5}'
-                                                # K=5 fused multi-step MTP draft. Acceptance ~3.3-3.5 tok/round here vs
-                                                # the TensorFold lane's 4.6 — the drafter is this engine's weak spot.
+                                                # K=5 fused multi-step MTP draft (~3.3-3.5 accepted tok/round).
+                                                # This is the main throughput lever on this model.
   load-format: fastsafetensors                  # the loader every boot figure below was measured with (weights in ~97 s,
                                                 # the whole boot ~4 min); remove for vLLM's default safetensors loader
   max-model-len: 262144                         # the model's native max
