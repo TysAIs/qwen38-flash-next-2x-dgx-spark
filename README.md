@@ -42,13 +42,19 @@ short answers.
 | code generation | **100.9** | 66.1 | 0.17 s |
 | prose | **54.6** | 50.1 | 0.17 s |
 
-**Prefill** (prompt tokens ÷ total elapsed, so an upper bound on true prefill speed):
-400 tok in 0.32 s, 1,529 tok in 0.60 s, 6,043 tok in 1.50 s.
+**Prefill** — prompt tokens ÷ time-to-first-token, with a 16-token reply so decode
+contributes almost nothing. Unique prompt per trial, so the prefix cache cannot flatter it.
 
-**The workload matters more than the configuration.** Structured output decodes at 115 tok/s
-while prose decodes at 55 on identical hardware, because a constrained continuation drafts
-better than open-ended prose. **Any tok/s figure without the workload named is not
-comparable** — and neither is an end-to-end figure compared against a decode-only one.
+| prompt tokens | TTFT | prefill tok/s |
+|---|---|---|
+| 232 | 0.18 s | 1,307 |
+| 3,232 | 1.00 s | 3,217 |
+| 25,632 | 7.70 s | 3,328 |
+| 102,432 | 31.82 s | 3,219 |
+| 200,033 | 65.11 s | 3,072 |
+
+Prefill plateaus at **~3,300 tok/s** and holds there to 200k tokens, with TTFT linear in
+prompt length across the whole range.
 
 ## Two checkpoints
 
