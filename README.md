@@ -70,19 +70,32 @@ private use behind your own moderation — not for a public deployment.
 
 ## Why this configuration
 
+Two of these we measured on this stack. The rest are inherited from the upstream recipe's
+own measurements and are marked accordingly — we have not re-verified them, so treat them as
+a starting point rather than a claim from us.
+
+**Measured here:**
+
 - **`max-num-seqs: 64`** — 64 seats. With K=5 each running request pins more pool at admission
   (the model's recurrent state plus the longer draft ring), so 64 long answers fill the pool
   after ~3 minutes and requests begin to queue. 48 keeps more headroom if your answers are long.
 - **`kv-cache-memory: 41000000000`** — 41 GB per box. Unified memory is shared with the weights
   and the compile cache on a 128 GB box; do not raise this casually.
+
+**Inherited from upstream (not re-measured here):**
+
 - **`NCCL_MAX_NCHANNELS: 4`** — NCCL otherwise builds 64 channels and splits every large
   message across all of them. Without GPUDirect RDMA on the GB10 each piece is copied through
-  host memory. Four channels measured +10% tok/s at 32 concurrent, +7% at 64, unchanged at 1.
-- **`MBX_PLE_REPLICATE: "0"`** — half the n-gram table per box, exchanged per gather. Same
-  speed as the full table on vLLM 0.30 and frees 13.4 GB per box, which is what pays for the
-  41 GB KV pin.
-- **`gdn-prefill-backend: flashinfer`** — about +5% prefill from 8k to 256k tokens.
-- **`async-scheduling: true`** — +9–12% at c=4–5, neutral at 8+.
+  host memory. Upstream reports +10% tok/s at 32 concurrent, +7% at 64, unchanged at 1.
+- **`MBX_PLE_REPLICATE: "0"`** — half the n-gram table per box, exchanged per gather. Upstream
+  reports the same speed as the full table on vLLM 0.30, freeing 13.4 GB per box, which is what
+  pays for the 41 GB KV pin.
+- **`gdn-prefill-backend: flashinfer`** — upstream reports about +5% prefill from 8k to 256k
+  tokens.
+- **`async-scheduling: true`** — upstream reports +9–12% at c=4–5, neutral at 8+.
+
+If you change any of these, re-measure the decode and prefill tables above before quoting a
+figure.
 
 ## Machine-specific files
 
