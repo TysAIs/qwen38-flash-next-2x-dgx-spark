@@ -56,6 +56,28 @@ contributes almost nothing. Unique prompt per trial, so the prefix cache cannot 
 Prefill plateaus at **~3,300 tok/s** and holds there to 200k tokens, with TTFT linear in
 prompt length across the whole range.
 
+**Concurrency** — code workload, 256-token budget, n=3 per rung, all streams launched
+together from one barrier. Aggregate is total tokens over the rung's wall-clock window.
+
+| concurrent | aggregate tok/s | vs c=1 | per-stream | TTFT |
+|---|---|---|---|---|
+| 1 | **70.4** | 1.00× | 98.5 | 0.14 s |
+| 4 | **204.0** | 2.90× | 75.4 | 0.21 s |
+| 8 | **345.6** | 4.91× | 63.5 | 0.25 s |
+| 16 | **469.2** | 6.66× | 45.1 | 0.40 s |
+| 32 | **564.5** | 8.02× | 28.4 | 0.70 s |
+| 64 | **636.9** | 9.05× | 16.9 | 1.35 s |
+
+**Plan around c=32, not c=64.** Aggregate scales 9.05× but flattens hard past 32 — doubling
+to 64 streams buys 13% more total throughput while halving per-stream speed and doubling
+TTFT. All 64 seats are usable and scheduling is fair (spread ~0.1 tok/s at every rung, zero
+errors across 525 completions); you just stop getting faster per agent.
+
+**The workload matters more than the configuration.** Structured output decodes at 115 tok/s
+while prose decodes at 55 on identical hardware, because a constrained continuation drafts
+better than open-ended prose. Any tok/s figure without the workload named is not comparable —
+and neither is an end-to-end figure compared against a decode-only one.
+
 ## Two checkpoints
 
 | `model:` in `recipe.yaml` | what it is | gated |

@@ -54,6 +54,40 @@ few hundred tokens the rate sits at **~3,300 tok/s**, holding to 200k. Measured 
 linear in prompt length across the whole range, which is the check that the numbers are real
 prefill and not a cached shortcut — a cache hit would have flattened TTFT as size grew.
 
+## Concurrency ladder — measured
+
+Workload: code generation, 256-token budget, thinking off, temperature 0, n=3 trials per
+rung. All streams of a rung launch from one barrier so they genuinely overlap. Per-stream
+figures are decode-only (tokens after the first), so queueing does not distort them.
+
+Aggregate tok/s is total completion tokens over the wall-clock window of the whole rung — the
+cluster's real throughput, not a sum of averages.
+
+| concurrent | aggregate tok/s | vs c=1 | per-stream | fairness spread | median TTFT | errors |
+|---|---|---|---|---|---|---|
+| 1 | **70.4** | 1.00× | 98.5 | 0.0 | 0.137 | 0 |
+| 2 | **122.0** | 1.73× | 90.3 | 0.1 | 0.156 | 0 |
+| 4 | **204.0** | 2.90× | 75.4 | 0.1 | 0.208 | 0 |
+| 8 | **345.6** | 4.91× | 63.5 | 0.1 | 0.251 | 0 |
+| 16 | **469.2** | 6.66× | 45.1 | 0.2 | 0.396 | 0 |
+| 32 | **564.5** | 8.02× | 28.4 | 0.2 | 0.702 | 0 |
+| 48 | **595.3** | 8.46× | 20.6 | 0.1 | 1.041 | 0 |
+| 64 | **636.9** | 9.05× | 16.9 | 0.1 | 1.349 | 0 |
+
+**Saturates around c=32.** Aggregate climbs 9.05× from one stream to 64, but the curve
+flattens hard past 32: c=32→64 buys only 13% more aggregate throughput while halving
+per-stream speed (28.4 → 16.9 tok/s) and doubling TTFT (0.70 → 1.35 s).
+
+That is the number to design around. Adding agents past ~32 is close to free in aggregate
+terms but expensive in latency — each one gets about half the speed. For an agent fleet, the
+useful ceiling is around 32 concurrent streams; beyond that you are queueing.
+
+**Fairness holds.** Per-stream spread stays at ~0.1 tok/s even at c=64, so the scheduler
+treats concurrent streams evenly — no stream is starved while another runs fast.
+
+**Zero errors across every rung, and all 525 completions opened with the required
+`CODE-OK` marker**, so no result here includes a truncated, failed or refused request.
+
 ## Reproducibility
 
 | workload | distinct output hashes across 5 trials at temp 0 |
