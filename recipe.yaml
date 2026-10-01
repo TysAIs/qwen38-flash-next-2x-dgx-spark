@@ -5,7 +5,7 @@
 # worker) and the per-box NCCL/gloo interface pins are added by run.sh from cluster.env — never put them here.
 
 server:
-  image: myllmbox/qwen38-flash-next-cluster-vllm:v6-spinfix   # pinned public tag (digest in README) = vLLM 0.30.0 (vllm/vllm-openai)
+  image: myllmbox/qwen38-flash-next-cluster-vllm:v6-spinfix-hermes   # pinned public tag (digest in README) = vLLM 0.30.0 (vllm/vllm-openai)
                                                       # + patches: the NVFP4 n-gram table on 0.30's embedding plugin; the
                                                       # 4-bit output head (hibrid48) — stock 0.30 cannot load either; the
                                                       # fused multi-step MTP draft (= vllm-project/vllm#58449); QSA rope

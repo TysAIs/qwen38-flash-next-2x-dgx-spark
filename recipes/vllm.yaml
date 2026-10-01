@@ -19,7 +19,7 @@
 # to multiply aggregate throughput. See docs/ENGINES.md for the full comparison.
 
 server:
-  image: myllmbox/qwen38-flash-next-cluster-vllm:v6-spinfix   # pinned public tag (digest in README)
+  image: myllmbox/qwen38-flash-next-cluster-vllm:v6-spinfix-hermes   # pinned public tag (digest in README)
                                                       # = vLLM 0.30.0 (vllm/vllm-openai) + patches:
                                                       # the NVFP4 n-gram table on 0.30's embedding plugin;
                                                       # the 4-bit output head (hibrid48) — stock 0.30 cannot

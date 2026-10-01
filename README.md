@@ -1,95 +1,133 @@
-# Qwen3.8-Flash-Next on 2× DGX Spark — vLLM and TensorFold lanes
+# Qwen3.8-Flash-Next on 2× DGX Spark
 
-Serve the same checkpoint on the same pair of Sparks with **either engine**. One repository, two
-lanes, one variable at launch.
+Serve **Qwen3.8-Flash-Next** on a pair of DGX Sparks over a single RDMA link. One recipe file,
+three commands, about four minutes to boot.
 
 ```bash
-ENGINE=vllm        ./run.sh    # many simultaneous clients  (default — this is the fleet lane)
-ENGINE=tensorfold  ./run.sh    # one agent at a time, faster per stream
+./setup.sh          # find the second box, the interconnect, open the firewall
+./run.sh            # boot the cluster
+./view.sh           # live throughput, acceptance, RDMA proof
+./stop.sh           # stop both boxes (weights and caches stay)
 ```
 
-**→ [docs/ENGINES.md](docs/ENGINES.md) is the decision document.** Read it before choosing; it has
-the measured head-to-head and says which lane fits which workload.
+## What this is
 
----
+| | |
+|---|---|
+| checkpoint | `Qwen3.8-Flash-Next-hibrid48` — and `-uncensored`, switchable in one line |
+| engine | vLLM 0.30.0 |
+| topology | TP=2 across two GB10 boxes, RoCE v2 over the ConnectX link |
+| context | 262,144 tokens |
+| KV pool | 2.5M pooled tokens (41 GB per box, BF16) |
+| seats | 64 concurrent |
 
-## The short version
+Both boxes need ~99 GB of weights. The kit downloads once and syncs to the worker at the same
+absolute path.
 
-| | vLLM lane | TensorFold lane |
+## Measured performance
+
+Measured on this exact stack — 2× GB10, RDMA, K=5, `vm.compaction_proactiveness=0`. One
+harness, n=5 per cell, thinking off, temperature 0, full trial lists in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+**Decode, single stream (c=1, 256-token budget)**
+
+| workload | median | spread |
 |---|---|---|
-| single stream | 67.7 tok/s | **71.0 tok/s** (94.7 on a drafting-friendly prompt) |
-| **aggregate at c=16** | **249.3 tok/s** | 79.9 tok/s |
-| scales with concurrency | **4.02×** from c=1 to c=16 | flat (0.85×) |
-| per-stream at c=16 | 29.5 tok/s | **82.7 tok/s** |
-| native two-node concurrency | works | **not finished upstream** |
-| **use it for** | **many agents, fleet serving** | one agent, latency-sensitive |
+| code generation | **72.7 tok/s** | 9.8 |
+| structured / JSON output | **67.6 tok/s** | 4.1 |
+| prose | **50.2 tok/s** | 5.5 |
 
-Both lanes run either checkpoint and produce **identical output for identical input** — verified by
-`token_sha`, a hash of the emitted tokens, matching across every trial.
+**Prefill (prompt ingestion)**
 
-The two lanes cannot run at the same time: each box has ~120 GB and one engine takes ~99 GB. Pick
-one per boot. A boot is about four minutes.
+| prompt | time | rate |
+|---|---|---|
+| 400 tok | 0.29 s | ~1,370 tok/s |
+| 1,529 tok | 0.60 s | ~2,550 tok/s |
+| 6,043 tok | 1.50 s | ~4,040 tok/s |
 
-## Layout — read this before editing anything
+**The workload matters more than the engine.** Code decodes 45% faster than prose on identical
+hardware, because a code-shaped continuation drafts better than open-ended prose. Any tok/s
+figure without the workload named is not comparable.
+
+## Two checkpoints
+
+| `model:` in `recipe.yaml` | what it is | gated |
+|---|---|---|
+| `Qwen3.8-Flash-Next-hibrid48` (default) | the calibrated base model | no |
+| `Qwen3.8-Flash-Next-hibrid48-uncensored` | the abliterated body — no refusals, no guardrails | **yes** |
+
+To switch, comment the active `model:` line and uncomment the other, then `./run.sh`. The
+uncensored body is gated on Hugging Face: accept its agreement, then `hf auth login` (or
+export `HF_TOKEN`) before `run.sh` can fetch it. It is intended for research, red-teaming and
+private use behind your own moderation — not for a public deployment.
+
+## Why this configuration
+
+- **`max-num-seqs: 64`** — 64 seats. With K=5 each running request pins more pool at admission
+  (the model's recurrent state plus the longer draft ring), so 64 long answers fill the pool
+  after ~3 minutes and requests begin to queue. 48 keeps more headroom if your answers are long.
+- **`kv-cache-memory: 41000000000`** — 41 GB per box. Unified memory is shared with the weights
+  and the compile cache on a 128 GB box; do not raise this casually.
+- **`NCCL_MAX_NCHANNELS: 4`** — NCCL otherwise builds 64 channels and splits every large
+  message across all of them. Without GPUDirect RDMA on the GB10 each piece is copied through
+  host memory. Four channels measured +10% tok/s at 32 concurrent, +7% at 64, unchanged at 1.
+- **`MBX_PLE_REPLICATE: "0"`** — half the n-gram table per box, exchanged per gather. Same
+  speed as the full table on vLLM 0.30 and frees 13.4 GB per box, which is what pays for the
+  41 GB KV pin.
+- **`gdn-prefill-backend: flashinfer`** — about +5% prefill from 8k to 256k tokens.
+- **`async-scheduling: true`** — +9–12% at c=4–5, neutral at 8+.
+
+## Machine-specific files
+
+`setup.sh` writes `cluster.env` — your boxes, interfaces and HCAs. It is gitignored and is the
+only machine-specific thing here. Everything else is portable.
+
+## What's in the image
+
+`myllmbox/qwen38-flash-next-cluster-vllm:v6-spinfix-hermes` — vLLM 0.30.0 plus:
+
+- the NVFP4 n-gram table on 0.30's embedding plugin
+- the 4-bit output head (`hibrid48`) — stock 0.30 loads neither
+- the fused multi-step MTP draft (= vllm-project/vllm#58449)
+- QSA rope clamp, loader page-cache drop, MoE/head quant config, draft-scale knob
+- **GB10 CPU spin-wait fix** — vLLM's shared-memory broadcast busy-loop sleeps 1 s per poll
+  when idle, which pins a core at 100% and heats the SoC, costing memory bandwidth shared
+  with the GPU. One-line `busy_loop_s` change, no throughput effect.
+- **Hermes chat-protocol fix** — Hermes sends reasoning as a top-level
+  `{"reasoning": {"enabled", "effort"}}` object, which stock 0.30 ignores; it only read
+  `reasoning_effort`. So an explicit "thinking off" left the model thinking, and an omitted
+  temperature fell back to the checkpoint default (1.0, full sampling) instead of greedy.
+  Both are correctness bugs, verified: `reasoning: {enabled: false}` now produces 0 reasoning
+  tokens and `{enabled: true}` still produces them.
+
+Build it with `docker build -t myllmbox/qwen38-flash-next-cluster-vllm:v6-spinfix-hermes
+docker/spinfix-hermes/`, then ship it to the worker. The Dockerfile **fails the build** if the
+protocol fix does not apply cleanly, so an image can never claim a fix it does not have.
+
+## Reproducing the numbers
+
+One harness, both arms, same session. If you change a knob, re-measure the same way — a number
+from one harness compared against a number from another is how this README previously claimed
+106 tok/s while the measured figure was 67.7.
+
+Throughput here is governed by how many tokens each step commits, not raw kernel speed: the
+engine's step cadence stays in a narrow ~20–21 Hz band while tokens-per-step swings roughly 2×
+on prompt fit. Depth and confidence *relocate* throughput along that flat curve rather than
+raising it — a 10-arm sweep over depth 0/1/2/3/5/8/12 × confidence 0/.30/.50/.80 produced no
+winning arm. Do not spend time re-running it.
+
+## Layout
 
 ```
-run.sh setup.sh stop.sh view.sh tune-host.sh   the kit (unchanged from the original recipe)
-lib.sh                                         shared helpers; rkey/rsection read $RECIPE_FILE
-lib-lanes.sh                                   ENGINE + CHECKPOINT resolution — the only place to
-                                               add a new lane or checkpoint
-
-recipes/vllm.yaml                              ALL model-side config for the vLLM lane
-recipes/tensorfold.yaml                        ALL model-side config for the TensorFold lane
-recipe.yaml                                    backwards-compatible alias for the vLLM lane
-                                               (what you get if you set no ENGINE)
-
-patches/tensorfold-qwen4exp-ct-tp2.patch       TensorFold 0.5.0 + the qwen4_exp compressed-tensors
-                                               port and native TP2. 20 files, 1746 insertions.
-                                               Apply to ashhart/TensorFold @ 9cd52ab.
-patches/tensorfold-ordered-f32-reducer.patch   the accepted optimization: fused Triton FP32
-                                               reducer for the PLE/target-verify path. Bit-identical
-                                               output, +8.6% engine steps/s.
-
-docs/ENGINES.md                                the comparison, the tradeoff, how to reproduce it
+run.sh setup.sh stop.sh view.sh tune-host.sh   the kit
+lib.sh                                         shared helpers; rkey/rsection read recipe.yaml
+recipe.yaml                                    ALL model-side configuration
+recipes/vllm.yaml                              the same config, lane-named
+docs/VLLM-LANE-REFERENCE.md                    the long-form reference
+docs/BENCHMARKS.md                             measured results with full trial lists
 cluster.env                                    YOUR machines — written by setup.sh, gitignored
 ```
-
-**The rule that keeps this from drifting:** all model-side configuration lives in
-`recipes/<engine>.yaml` and nowhere else. `run.sh` never hardcodes a model, an image, a port or a
-flag. Adding a third engine means adding one YAML file and one line in `lib-lanes.sh` — no changes
-to the kit scripts.
-
-## Checkpoints
-
-Both lanes run either body. The output head (`hibrid48`, NVFP4) is identical either way.
-
-| `CHECKPOINT=` | repo | gated? |
-|---|---|---|
-| `stock` (default) | `myllmbox/Qwen3.8-Flash-Next-hibrid48` | no |
-| `uncensored` | `myllmbox/Qwen3.8-Flash-Next-hibrid48-uncensored` | **yes** — accept the HF agreement, then `hf auth login` |
-
-`CHECKPOINT` overrides both what gets downloaded and the name clients must request, so it is
-impossible to pull stock weights and serve them under the uncensored name.
-
-The uncensored body is the abliterated checkpoint — no refusals, no guardrails. Research,
-red-teaming and private use behind your own moderation. Not a model to point a public deployment at.
-
-```bash
-CHECKPOINT=uncensored ENGINE=vllm ./run.sh
-```
-
-## Setup
-
-```bash
-./setup.sh                  # finds the second box, the interconnect, opens the firewall
-./setup.sh user@203.0.113.10   # or name the worker explicitly
-```
-
-`setup.sh` writes `cluster.env` — your boxes, interfaces and HCAs. That file is gitignored and is
-the only machine-specific thing in the kit. Everything else is portable.
-
-Then `./run.sh`, and watch it come up with `./view.sh` (throughput, acceptance, RDMA proof).
-`./stop.sh` stops both boxes; weights and caches stay, so a restart is fast.
 
 ## Requirements
 
@@ -98,23 +136,8 @@ Then `./run.sh`, and watch it come up with `./view.sh` (throughput, acceptance, 
 - ~99 GB per box for the weights. `run.sh` downloads once and syncs to the worker.
 - ~4 minutes to boot.
 
-## Honest status of the TensorFold lane
-
-TensorFold is genuinely the faster engine **per stream** and its advantage is real and bit-exact.
-Its native two-node *concurrent* path is not finished upstream and does not yet scale in aggregate;
-on this kit it has never completed a successful concurrent boot. The 0.85× figure is a placeholder
-from a scheduler that has not yet run under load, **not** a measured ceiling — the per-stream win of
-+46% to +180% at every concurrency level is the signature of fast kernels behind a scheduler that
-does not overlap requests.
-
-Treat the TensorFold lane as single-stream / low-concurrency until that path is validated. **Do not
-put a fleet behind it.** The vLLM lane is the safe default and the one with numbers behind it at
-every rung.
-
 ## License and provenance
 
-The kit scripts, `recipes/vllm.yaml` and this README are the original recipe work. TensorFold is
-MIT-licensed (see its `LICENSE`); the patches in `patches/` are contributions against
-[ashhart/TensorFold](https://github.com/ashhart/TensorFold) @ `9cd52ab` (0.5.0) and carry no
-third-party code. The model weights are under the Qwen Community License 1.0 — read it before
-commercial use (see `README` in the model repo).
+The weights are under the Qwen Community License 1.0 — read it before commercial use (display
+requirements above 100M MAU / $20M revenue). See the model repo. vLLM is Apache-2.0; the
+patches in this image are contributions against vLLM 0.30.0.

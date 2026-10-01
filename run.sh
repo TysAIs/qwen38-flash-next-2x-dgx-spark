@@ -8,8 +8,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 source lib.sh
-# shellcheck source=lib-lanes.sh
-source lib-lanes.sh   # ENGINE (vllm|tensorfold) + CHECKPOINT (stock|uncensored)
 command -v docker >/dev/null || { echo "docker is required"; exit 1; }
 
 # 0. boxes — none configured yet? set the cluster up first.
@@ -21,10 +19,7 @@ load_cluster
 ssh_w true 2>/dev/null || { echo "✗ cannot reach the worker $WORKER — rerun ./setup.sh"; exit 1; }
 
 IMAGE="$(rkey server image)";   PORT="$(rkey server port)";   HOST="$(rkey server host)";  HOST="${HOST:-127.0.0.1}"
-ENTRYPOINT="$(rkey server entrypoint)"; ENTRYPOINT="${ENTRYPOINT:-vllm}"   # vllm serve | tensorfold
 HF_REPO="$(rkey server model)"; MPORT="$(rkey server master_port)"; MPORT="${MPORT:-25000}"
-HF_REPO="$(resolve_checkpoint)"        # CHECKPOINT wins over the lane file's default
-SERVED_NAME="$(served_name)"          # ...and so does the name clients pass
 MODELS_DIR="$(rkey server models_dir)"; CACHE_DIR="$(rkey server cache_dir)"; CPUSET="$(rkey server cpuset)"
 mkdir -p "$MODELS_DIR" "$CACHE_DIR"
 MODELS_ABS="$(cd "$MODELS_DIR" && pwd)"; CACHE_ABS="$(cd "$CACHE_DIR" && pwd)"
@@ -75,13 +70,9 @@ done
 #    falls back to TCP over the same cable — half the speed, no error). Per-box pins: NCCL/gloo on the
 #    interconnect iface, VLLM_HOST_IP = that box's interconnect IP (the LAN must never carry cluster traffic).
 ENVS=(); while IFS=$'\t' read -r k v; do [ -n "$k" ] && ENVS+=(-e "$k=$v"); done < <(rsection env)
-# rsection emits the lane's flags, but CHECKPOINT must win over the file's default for the two
-# keys it controls: the weights we downloaded (HF_REPO, above) and the name clients must ask for.
 FLAGS=(); while IFS=$'\t' read -r k v; do
-  [ "$k" = "served-model-name" ] && continue
   case "$v" in true) FLAGS+=("--$k");; false|null|"") ;; *) FLAGS+=("--$k" "$v");; esac
 done < <(rsection vllm)
-FLAGS+=(--served-model-name "$SERVED_NAME")
 compose() {  # compose <rank> <iface> <ic-ip> <hca> <has-rdma yes|no> <gid-index|"">  → prints the docker run command (quoted)
   local rank=$1 iface=$2 ic=$3 hca=$4 rdma=$5 gid=$6 a=()
   a=(docker run -d --name "$NAME" --gpus all --ipc=host --network host --cap-add SYS_PTRACE)
@@ -94,7 +85,7 @@ compose() {  # compose <rank> <iface> <ic-ip> <hca> <has-rdma yes|no> <gid-index
   [ -n "$hca" ] && a+=(-e "NCCL_IB_HCA=$hca")
   a+=("${ENVS[@]}")
   [ -n "$gid" ] && a+=(-e "NCCL_IB_GID_INDEX=$gid")    # probed, AFTER recipe.yaml's env → docker keeps the last -e
-  a+=(--entrypoint "$ENTRYPOINT" "$IMAGE" serve "/models/$LOCAL_NAME" --host "$HOST" --port "$PORT"
+  a+=(--entrypoint vllm "$IMAGE" serve "/models/$LOCAL_NAME" --host "$HOST" --port "$PORT"
       --nnodes 2 --node-rank "$rank" --master-addr "$HEAD_IC" --master-port "$MPORT" --tensor-parallel-size 2)
   [ "$rank" != 0 ] && a+=(--headless)
   a+=("${FLAGS[@]}")

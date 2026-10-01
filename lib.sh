@@ -5,17 +5,13 @@ NAME="qwen38-flash-next-cluster"          # container name on BOTH boxes
 CLUSTER_ENV="cluster.env"                  # written by setup.sh: HEAD_*/WORKER_* (machine-specific, gitignored)
 
 # --- tiny recipe.yaml reader (two-level: section -> key: value; strips quotes/comments) ---------
-# Which recipe file every reader uses. lib-lanes.sh points this at recipes/<engine>.yaml.
-# Overridable: RECIPE_FILE=my-recipe.yaml ./run.sh
-RECIPE_FILE="${RECIPE_FILE:-recipe.yaml}"
-
 rkey() {  # rkey <section> <key>
   awk -v s="$1" -v k="$2" '
     /^[A-Za-z_]/ { sec=$1; sub(":$","",sec) }
     sec==s && $1==k":" {
       sub(/^[ ]*[^:]*:[ ]*/,""); sub(/[ ]+#.*$/,"")
       gsub(/^["\x27]|["\x27]$/,""); print; exit
-    }' "$RECIPE_FILE"
+    }' recipe.yaml
 }
 rsection() {  # all key/value lines of a section, "key<TAB>value" (quotes/comments stripped)
   awk -v s="$1" '
@@ -26,7 +22,7 @@ rsection() {  # all key/value lines of a section, "key<TAB>value" (quotes/commen
       val=line; sub(/^[^:]*:[ ]*/,"",val); sub(/[ ]+#.*$/,"",val)
       gsub(/^["\x27]|["\x27]$/,"",val)
       if (key != "") print key "\t" val
-    }' "$RECIPE_FILE"
+    }' recipe.yaml
 }
 
 # --- cluster.env ----------------------------------------------------------------------------------
