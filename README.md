@@ -30,25 +30,25 @@ Measured on this exact stack — 2× GB10, RDMA, K=5, `vm.compaction_proactivene
 harness, n=5 per cell, thinking off, temperature 0, full trial lists in
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-**Decode, single stream (c=1, 256-token budget)**
+**Decode, single stream (c=1, 512-token budget)**
 
-| workload | median | spread |
-|---|---|---|
-| code generation | **72.7 tok/s** | 9.8 |
-| structured / JSON output | **67.6 tok/s** | 4.1 |
-| prose | **50.2 tok/s** | 5.5 |
+Decode tok/s is the generation rate *after* the first token — the engine's real writing
+speed. End-to-end is what a caller waits for. Both are reported because they differ a lot on
+short answers.
 
-**Prefill (prompt ingestion)**
+| workload | decode tok/s | end-to-end | TTFT |
+|---|---|---|---|
+| structured / JSON | **114.9** | 66.1 | 0.18 s |
+| code generation | **100.9** | 66.1 | 0.17 s |
+| prose | **54.6** | 50.1 | 0.17 s |
 
-| prompt | time | rate |
-|---|---|---|
-| 400 tok | 0.29 s | ~1,370 tok/s |
-| 1,529 tok | 0.60 s | ~2,550 tok/s |
-| 6,043 tok | 1.50 s | ~4,040 tok/s |
+**Prefill** (prompt tokens ÷ total elapsed, so an upper bound on true prefill speed):
+400 tok in 0.32 s, 1,529 tok in 0.60 s, 6,043 tok in 1.50 s.
 
-**The workload matters more than the engine.** Code decodes 45% faster than prose on identical
-hardware, because a code-shaped continuation drafts better than open-ended prose. Any tok/s
-figure without the workload named is not comparable.
+**The workload matters more than the configuration.** Structured output decodes at 115 tok/s
+while prose decodes at 55 on identical hardware, because a constrained continuation drafts
+better than open-ended prose. **Any tok/s figure without the workload named is not
+comparable** — and neither is an end-to-end figure compared against a decode-only one.
 
 ## Two checkpoints
 
@@ -109,7 +109,10 @@ protocol fix does not apply cleanly, so an image can never claim a fix it does n
 
 One harness, both arms, same session. If you change a knob, re-measure the same way — a number
 from one harness compared against a number from another is how this README previously claimed
-106 tok/s while the measured figure was 67.7.
+106 tok/s while a same-stack measurement read far lower. Measuring tok/s as
+`completion_tokens / total_elapsed` charges the request for prefill and time-to-first-token;
+on a 30-token answer that is most of the time. The harness here streams and reports decode
+and end-to-end separately.
 
 Throughput here is governed by how many tokens each step commits, not raw kernel speed: the
 engine's step cadence stays in a narrow ~20–21 Hz band while tokens-per-step swings roughly 2×
